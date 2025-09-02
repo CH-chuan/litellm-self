@@ -259,6 +259,7 @@ class OllamaConfig(BaseConfig):
         json_mode: Optional[bool] = None,
     ) -> ModelResponse:
         response_json = raw_response.json()
+
         ## RESPONSE OBJECT
         model_response.choices[0].finish_reason = "stop"
         if request_data.get("format", "") == "json":
@@ -288,7 +289,9 @@ class OllamaConfig(BaseConfig):
                                     "id": f"call_{str(uuid.uuid4())}",
                                     "function": {
                                         "name": function_call["name"],
-                                        "arguments": json.dumps(function_call["arguments"]),
+                                        "arguments": json.dumps(
+                                            function_call["arguments"]
+                                        ),
                                     },
                                     "type": "function",
                                 }
@@ -309,7 +312,38 @@ class OllamaConfig(BaseConfig):
                     model_response.choices[0].message = message  # type: ignore
                     model_response.choices[0].finish_reason = "stop"
         else:
-            model_response.choices[0].message.content = response_json["response"]  # type: ignore
+            # check if there's function call in the response
+            tool_calls = response_json.get("tool_calls", [])
+            if tool_calls:
+                tool_calls = [
+                    {
+                        "id": f"call_{str(uuid.uuid4())}",
+                        "function": {
+                            "name": tool_call["function"]["name"],
+                            "arguments": json.dumps(tool_call["function"]["arguments"]),
+                        },
+                    }
+                    for tool_call in tool_calls
+                ]
+            # check if there's thinking in the response
+            thinking_text = response_json.get("thinking", "")
+            if not thinking_text or not thinking_text.strip():
+                message = litellm.Message(
+                    content=response_json["response"],
+                    tool_calls=tool_calls,
+                )
+            else:
+                message = litellm.Message(
+                    content=response_json["response"],
+                    tool_calls=tool_calls,
+                    reasoning_content=thinking_text,
+                )
+            model_response.choices[0].message = message  # type: ignore
+            # Set finish_reason based on whether there are tool calls
+            if tool_calls:
+                model_response.choices[0].finish_reason = "tool_calls"
+            else:
+                model_response.choices[0].finish_reason = "stop"
         model_response.created = int(time.time())
         model_response.model = "ollama/" + model
         _prompt = request_data.get("prompt", "")
@@ -439,7 +473,9 @@ class OllamaTextCompletionResponseIterator(BaseModelResponseIterator):
     ) -> Union[GenericStreamingChunk, ModelResponseStream]:
         return self.chunk_parser(json.loads(str_line))
 
-    def chunk_parser(self, chunk: dict) -> Union[GenericStreamingChunk, ModelResponseStream]:
+    def chunk_parser(
+        self, chunk: dict
+    ) -> Union[GenericStreamingChunk, ModelResponseStream]:
         try:
             if "error" in chunk:
                 raise Exception(f"Ollama Error - {chunk}")
